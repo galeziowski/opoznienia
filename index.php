@@ -134,7 +134,7 @@ $pracownicy = $stmt->fetchAll();
 
 <div class="container">
 
-    <h1>Lista pracowników firmy pana P.</h1>
+    <h1>Lista pracowników firmy pani Z.</h1>
 
     <div class="count">
         Liczba pracowników: <strong><?= count($pracownicy) ?></strong>
