@@ -5,10 +5,10 @@
 // ============================================================
 
 $repoOwner = 'galeziowski';
-$repoName = 'opoznienia';
-$branch = 'main';
+$repoName  = 'opoznienia';
+$branch    = 'main';
 
-$projectDir = '/volume1/web/opoznienia';
+$projectDir  = '/volume1/web/opoznienia';
 $deployScript = '/usr/local/bin/opoznienia-deploy.sh';
 
 $githubUrl = "https://github.com/{$repoOwner}/{$repoName}.git";
@@ -33,46 +33,18 @@ function runCommand(string $command): array
 
 
 /**
- * Pobiera aktualny commit znajdujący się na serwerze.
+ * Pobiera lokalny commit z repozytorium.
+ *
+ * Używamy kontenera alpine/git, ponieważ Git
+ * nie jest zainstalowany bezpośrednio na Synology.
  */
 function getLocalCommit(string $projectDir): ?string
 {
     $command =
-        '/usr/bin/git -C ' .
-        escapeshellarg($projectDir) .
-        ' rev-parse --short HEAD';
-
-    $result = runCommand($command);
-
-    if ($result['returnCode'] !== 0 || empty($result['output'])) {
-        return null;
-    }
-
-    $commit = trim($result['output'][0]);
-
-    if (!preg_match('/^[a-f0-9]{7,40}$/i', $commit)) {
-        return null;
-    }
-
-    return $commit;
-}
-
-
-/**
- * Pobiera aktualny commit z GitHuba.
- *
- * Korzystamy z tego samego kontenera alpine/git,
- * który jest używany podczas deployu.
- */
-function getGithubCommit(string $githubUrl, string $branch): ?string
-{
-    $command =
         '/usr/local/bin/docker run --rm ' .
+        '-v ' . escapeshellarg($projectDir . ':/repo') . ' ' .
         'alpine/git ' .
-        'ls-remote ' .
-        escapeshellarg($githubUrl) .
-        ' ' .
-        escapeshellarg('refs/heads/' . $branch);
+        '-C /repo rev-parse --short HEAD';
 
     $result = runCommand($command);
 
@@ -81,10 +53,64 @@ function getGithubCommit(string $githubUrl, string $branch): ?string
     }
 
     foreach ($result['output'] as $line) {
-        $line = trim($line);
 
-        if (preg_match('/^([a-f0-9]{40})\s+refs\/heads\/' . preg_quote($branch, '/') . '$/i', $line, $matches)) {
-            return substr($matches[1], 0, 7);
+        $commit = trim($line);
+
+        if (preg_match('/^[a-f0-9]{7,40}$/i', $commit)) {
+            return substr($commit, 0, 7);
+        }
+    }
+
+    return null;
+}
+
+
+/**
+ * Pobiera aktualny commit z GitHuba.
+ *
+ * Używamy git ls-remote w kontenerze alpine/git.
+ *
+ * Jest retry, ponieważ DNS na Synology/Dockerze
+ * potrafi chwilowo zwrócić błąd.
+ */
+function getGithubCommit(string $githubUrl, string $branch): ?string
+{
+    $maxAttempts = 3;
+
+    for ($attempt = 1; $attempt <= $maxAttempts; $attempt++) {
+
+        $command =
+            '/usr/local/bin/docker run --rm ' .
+            'alpine/git ' .
+            'ls-remote ' .
+            escapeshellarg($githubUrl) .
+            ' ' .
+            escapeshellarg('refs/heads/' . $branch);
+
+        $result = runCommand($command);
+
+        if ($result['returnCode'] === 0) {
+
+            foreach ($result['output'] as $line) {
+
+                $line = trim($line);
+
+                if (
+                    preg_match(
+                        '/^([a-f0-9]{40})\s+refs\/heads\/' .
+                        preg_quote($branch, '/') .
+                        '$/i',
+                        $line,
+                        $matches
+                    )
+                ) {
+                    return substr($matches[1], 0, 7);
+                }
+            }
+        }
+
+        if ($attempt < $maxAttempts) {
+            sleep(2);
         }
     }
 
@@ -112,13 +138,16 @@ function deploy(string $deployScript): array
 $deployOutput = null;
 $deploySuccess = null;
 
-if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['deploy'])) {
+if (
+    $_SERVER['REQUEST_METHOD'] === 'POST' &&
+    isset($_POST['deploy'])
+) {
 
     $result = deploy($deployScript);
 
     $deployOutput = implode("\n", $result['output']);
-    $deploySuccess = ($result['returnCode'] === 0);
 
+    $deploySuccess = ($result['returnCode'] === 0);
 }
 
 
@@ -126,16 +155,22 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['deploy'])) {
 // SPRAWDZENIE WERSJI
 // ============================================================
 
-$localCommit = getLocalCommit($projectDir);
+$localCommit  = getLocalCommit($projectDir);
 $githubCommit = getGithubCommit($githubUrl, $branch);
 
 $versionStatus = 'unknown';
 
-if ($localCommit !== null && $githubCommit !== null) {
+if (
+    $localCommit !== null &&
+    $githubCommit !== null
+) {
 
     if (strcasecmp($localCommit, $githubCommit) === 0) {
+
         $versionStatus = 'current';
+
     } else {
+
         $versionStatus = 'outdated';
     }
 }
@@ -184,9 +219,12 @@ if ($localCommit !== null && $githubCommit !== null) {
         }
 
         h1 {
-            margin-top: 0;
-            margin-bottom: 8px;
+            margin: 0 0 8px 0;
             font-size: 30px;
+        }
+
+        h2 {
+            margin-top: 0;
         }
 
         .repo {
@@ -195,10 +233,11 @@ if ($localCommit !== null && $githubCommit !== null) {
         }
 
         .card {
-            background: white;
+            background: #ffffff;
             border-radius: 12px;
             padding: 24px;
             margin-bottom: 20px;
+
             box-shadow:
                 0 2px 8px rgba(0, 0, 0, 0.06);
         }
@@ -207,6 +246,7 @@ if ($localCommit !== null && $githubCommit !== null) {
             padding: 16px 20px;
             border-radius: 10px;
             margin-bottom: 20px;
+
             font-size: 18px;
             font-weight: 600;
         }
@@ -228,8 +268,12 @@ if ($localCommit !== null && $githubCommit !== null) {
 
         .versions {
             display: grid;
-            grid-template-columns: 1fr 1fr;
+
+            grid-template-columns:
+                repeat(2, minmax(0, 1fr));
+
             gap: 16px;
+
             margin-bottom: 24px;
         }
 
@@ -241,28 +285,43 @@ if ($localCommit !== null && $githubCommit !== null) {
 
         .version-label {
             display: block;
+
             color: #6b7280;
+
             font-size: 14px;
+
             margin-bottom: 8px;
         }
 
         .version {
             font-family: monospace;
+
             font-size: 22px;
+
             font-weight: 700;
         }
 
         button,
         .button {
+
             display: inline-block;
+
             border: 0;
+
             border-radius: 8px;
+
             padding: 12px 18px;
+
             font-size: 16px;
+
             font-weight: 600;
+
             cursor: pointer;
+
             text-decoration: none;
+
             background: #2563eb;
+
             color: white;
         }
 
@@ -273,7 +332,9 @@ if ($localCommit !== null && $githubCommit !== null) {
 
         .refresh {
             margin-left: 10px;
+
             background: #e5e7eb;
+
             color: #374151;
         }
 
@@ -290,14 +351,24 @@ if ($localCommit !== null && $githubCommit !== null) {
         }
 
         pre {
+
             background: #111827;
+
             color: #e5e7eb;
+
             padding: 18px;
+
             border-radius: 8px;
+
             overflow-x: auto;
+
             white-space: pre-wrap;
+
             word-break: break-word;
+
             line-height: 1.5;
+
+            font-size: 14px;
         }
 
         @media (max-width: 650px) {
@@ -325,13 +396,29 @@ if ($localCommit !== null && $githubCommit !== null) {
 
 <div class="container">
 
+
+    <!-- ======================================================
+         HEADER
+    ======================================================= -->
+
     <h1>🚀 Deploy — Opoźnienia</h1>
 
     <div class="repo">
+
         GitHub:
-        <strong><?= htmlspecialchars($repoOwner . '/' . $repoName) ?></strong>
+
+        <strong>
+            <?= htmlspecialchars(
+                $repoOwner . '/' . $repoName
+            ) ?>
+        </strong>
+
         · branch:
-        <strong><?= htmlspecialchars($branch) ?></strong>
+
+        <strong>
+            <?= htmlspecialchars($branch) ?>
+        </strong>
+
     </div>
 
 
@@ -368,6 +455,7 @@ if ($localCommit !== null && $githubCommit !== null) {
 
         <div class="versions">
 
+
             <div class="version-box">
 
                 <span class="version-label">
@@ -375,7 +463,9 @@ if ($localCommit !== null && $githubCommit !== null) {
                 </span>
 
                 <span class="version">
-                    <?= htmlspecialchars($localCommit ?? '—') ?>
+                    <?= htmlspecialchars(
+                        $localCommit ?? '—'
+                    ) ?>
                 </span>
 
             </div>
@@ -388,30 +478,40 @@ if ($localCommit !== null && $githubCommit !== null) {
                 </span>
 
                 <span class="version">
-                    <?= htmlspecialchars($githubCommit ?? '—') ?>
+                    <?= htmlspecialchars(
+                        $githubCommit ?? '—'
+                    ) ?>
                 </span>
 
             </div>
+
 
         </div>
 
 
         <!-- ==================================================
-             DEPLOY
+             DEPLOY BUTTON
         =================================================== -->
 
         <form method="post"
               onsubmit="return confirmDeploy();">
 
-            <button type="submit"
-                    name="deploy"
-                    value="1">
+            <button
+                type="submit"
+                name="deploy"
+                value="1">
+
                 ⬇ Pobierz najnowszą wersję
+
             </button>
 
-            <a href="admin.php"
-               class="button refresh">
+
+            <a
+                href="admin.php"
+                class="button refresh">
+
                 ↻ Odśwież status
+
             </a>
 
         </form>
@@ -420,12 +520,13 @@ if ($localCommit !== null && $githubCommit !== null) {
 
 
     <!-- ======================================================
-         WYNIK DEPLOYU
+         DEPLOY RESULT
     ======================================================= -->
 
     <?php if ($deployOutput !== null): ?>
 
         <div class="card">
+
 
             <?php if ($deploySuccess): ?>
 
@@ -442,7 +543,10 @@ if ($localCommit !== null && $githubCommit !== null) {
             <?php endif; ?>
 
 
-            <pre><?= htmlspecialchars($deployOutput) ?></pre>
+            <pre><?= htmlspecialchars(
+                $deployOutput
+            ) ?></pre>
+
 
         </div>
 
