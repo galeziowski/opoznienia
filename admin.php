@@ -8,8 +8,12 @@ $repoOwner = 'galeziowski';
 $repoName  = 'opoznienia';
 $branch    = 'main';
 
+$projectDir = '/volume1/web/opoznienia';
+
 $deployScript = '/usr/local/bin/opoznienia-deploy.sh';
 $statusScript = '/usr/local/bin/opoznienia-status.sh';
+
+$statusFile = $projectDir . '/.deploy-status.json';
 
 
 // ============================================================
@@ -30,88 +34,77 @@ function runCommand(string $command): array
 }
 
 
-// ============================================================
-// STATUS REPOZYTORIUM
-// ============================================================
+/**
+ * Odczytuje zapisany status.
+ *
+ * UWAGA:
+ * Ta funkcja NIE łączy się z GitHubem.
+ */
+function readStatus(string $statusFile): array
+{
+    if (!file_exists($statusFile)) {
+        return [
+            'local_commit' => null,
+            'github_commit' => null,
+            'status' => 'unknown',
+            'checked_at' => null
+        ];
+    }
 
-function getRepositoryStatus(string $statusScript): array
+    $content = file_get_contents($statusFile);
+
+    if ($content === false) {
+        return [
+            'local_commit' => null,
+            'github_commit' => null,
+            'status' => 'unknown',
+            'checked_at' => null
+        ];
+    }
+
+    $data = json_decode($content, true);
+
+    if (!is_array($data)) {
+        return [
+            'local_commit' => null,
+            'github_commit' => null,
+            'status' => 'unknown',
+            'checked_at' => null
+        ];
+    }
+
+    return [
+        'local_commit' =>
+            $data['local_commit'] ?? null,
+
+        'github_commit' =>
+            $data['github_commit'] ?? null,
+
+        'status' =>
+            $data['status'] ?? 'unknown',
+
+        'checked_at' =>
+            $data['checked_at'] ?? null
+    ];
+}
+
+
+/**
+ * Sprawdzenie GitHuba.
+ */
+function refreshStatus(string $statusScript): array
 {
     $command =
         '/bin/sudo ' .
         escapeshellarg($statusScript);
 
-    $result = runCommand($command);
-
-    $localCommit = null;
-    $githubCommit = null;
-
-    $section = null;
-
-    foreach ($result['output'] as $line) {
-
-        $line = trim($line);
-
-        if ($line === 'LOCAL:') {
-            $section = 'local';
-            continue;
-        }
-
-        if ($line === 'GITHUB:') {
-            $section = 'github';
-            continue;
-        }
-
-        if ($section === 'local') {
-
-            if (
-                preg_match(
-                    '/^[a-f0-9]{7,40}$/i',
-                    $line
-                )
-            ) {
-                $localCommit = substr($line, 0, 7);
-                $section = null;
-            }
-
-            continue;
-        }
-
-        if ($section === 'github') {
-
-            if (
-                preg_match(
-                    '/^([a-f0-9]{40})\s+refs\/heads\/' .
-                    preg_quote($GLOBALS['branch'], '/') .
-                    '$/i',
-                    $line,
-                    $matches
-                )
-            ) {
-                $githubCommit = substr(
-                    $matches[1],
-                    0,
-                    7
-                );
-
-                $section = null;
-            }
-        }
-    }
-
-    return [
-        'local' => $localCommit,
-        'github' => $githubCommit,
-        'success' =>
-            $localCommit !== null &&
-            $githubCommit !== null
-    ];
+    return runCommand($command);
 }
 
 
-// ============================================================
-// DEPLOY
-// ============================================================
-
+/**
+ * Deploy.
+ */
 function deploy(string $deployScript): array
 {
     $command =
@@ -123,11 +116,40 @@ function deploy(string $deployScript): array
 
 
 // ============================================================
-// OBSŁUGA POST
+// OBSŁUGA AKCJI
 // ============================================================
 
-$deployOutput = null;
-$deploySuccess = null;
+$actionOutput = null;
+$actionSuccess = null;
+$actionType = null;
+
+
+// ------------------------------------------------------------
+// ODŚWIEŻ STATUS
+// ------------------------------------------------------------
+
+if (
+    $_SERVER['REQUEST_METHOD'] === 'POST' &&
+    isset($_POST['refresh_status'])
+) {
+
+    $result = refreshStatus($statusScript);
+
+    $actionOutput = implode(
+        "\n",
+        $result['output']
+    );
+
+    $actionSuccess =
+        ($result['returnCode'] === 0);
+
+    $actionType = 'refresh';
+}
+
+
+// ------------------------------------------------------------
+// DEPLOY
+// ------------------------------------------------------------
 
 if (
     $_SERVER['REQUEST_METHOD'] === 'POST' &&
@@ -136,43 +158,58 @@ if (
 
     $result = deploy($deployScript);
 
-    $deployOutput = implode(
+    $actionOutput = implode(
         "\n",
         $result['output']
     );
 
-    $deploySuccess =
+    $actionSuccess =
         ($result['returnCode'] === 0);
-}
+
+    $actionType = 'deploy';
 
 
-// ============================================================
-// POBIERANIE STATUSU
-// ============================================================
+    // --------------------------------------------------------
+    // Po udanym deployu od razu aktualizujemy status.
+    // --------------------------------------------------------
 
-$status = getRepositoryStatus($statusScript);
+    if ($actionSuccess) {
 
-$localCommit = $status['local'];
-$githubCommit = $status['github'];
+        $statusResult =
+            refreshStatus($statusScript);
 
-$versionStatus = 'unknown';
-
-if ($status['success']) {
-
-    if (
-        strcasecmp(
-            $localCommit,
-            $githubCommit
-        ) === 0
-    ) {
-
-        $versionStatus = 'current';
-
-    } else {
-
-        $versionStatus = 'outdated';
+        $actionOutput .=
+            "\n\n=== STATUS PO DEPLOY ===\n" .
+            implode(
+                "\n",
+                $statusResult['output']
+            );
     }
 }
+
+
+// ============================================================
+// ODCZYT ZAPISANEGO STATUSU
+// ============================================================
+
+$status = readStatus($statusFile);
+
+$localCommit =
+    $status['local_commit'];
+
+$githubCommit =
+    $status['github_commit'];
+
+$versionStatus =
+    $status['status'];
+
+$checkedAt =
+    $status['checked_at'];
+
+
+// ============================================================
+// HTML
+// ============================================================
 
 ?>
 <!DOCTYPE html>
@@ -188,17 +225,24 @@ if ($status['success']) {
 
     <title>Deploy — Opoźnienia</title>
 
+
     <style>
 
         * {
             box-sizing: border-box;
         }
 
+
         body {
+
             margin: 0;
+
             padding: 40px 20px;
+
             background: #f5f7fa;
+
             color: #1f2937;
+
             font-family:
                 -apple-system,
                 BlinkMacSystemFont,
@@ -208,157 +252,268 @@ if ($status['success']) {
                 sans-serif;
         }
 
+
         .container {
+
             max-width: 900px;
+
             margin: 0 auto;
         }
 
+
         h1 {
+
             margin: 0 0 8px;
+
             font-size: 30px;
         }
 
+
+        h2 {
+
+            margin-top: 0;
+        }
+
+
         .repo {
+
             color: #6b7280;
+
             margin-bottom: 30px;
         }
 
+
         .card {
-            background: #fff;
+
+            background: #ffffff;
+
             border-radius: 12px;
+
             padding: 24px;
+
             margin-bottom: 20px;
+
             box-shadow:
-                0 2px 8px rgba(0,0,0,.06);
+                0 2px 8px rgba(0, 0, 0, 0.06);
         }
 
+
         .status {
+
             padding: 16px 20px;
+
             border-radius: 10px;
+
             margin-bottom: 20px;
+
             font-size: 18px;
+
             font-weight: 600;
         }
 
+
         .status.current {
+
             background: #ecfdf5;
+
             color: #047857;
         }
 
+
         .status.outdated {
+
             background: #fffbeb;
+
             color: #b45309;
         }
 
+
         .status.unknown {
-            background: #fef2f2;
-            color: #b91c1c;
+
+            background: #f3f4f6;
+
+            color: #6b7280;
         }
 
+
         .versions {
+
             display: grid;
-            grid-template-columns: repeat(2, minmax(0, 1fr));
+
+            grid-template-columns:
+                repeat(2, minmax(0, 1fr));
+
             gap: 16px;
+
             margin-bottom: 24px;
         }
 
+
         .version-box {
+
             background: #f8fafc;
+
             border-radius: 10px;
+
             padding: 18px;
         }
 
+
         .version-label {
+
             display: block;
+
             color: #6b7280;
+
             font-size: 14px;
+
             margin-bottom: 8px;
         }
 
+
         .version {
+
             font-family: monospace;
+
             font-size: 22px;
+
             font-weight: 700;
         }
 
-        button,
-        .button {
-            display: inline-block;
+
+        .checked {
+
+            color: #6b7280;
+
+            font-size: 14px;
+
+            margin-top: 18px;
+        }
+
+
+        .actions {
+
+            display: flex;
+
+            flex-wrap: wrap;
+
+            gap: 10px;
+        }
+
+
+        button {
+
             border: 0;
+
             border-radius: 8px;
+
             padding: 12px 18px;
+
             font-size: 16px;
+
             font-weight: 600;
+
             cursor: pointer;
-            text-decoration: none;
+
             background: #2563eb;
+
             color: white;
         }
 
-        button:hover,
-        .button:hover {
+
+        button:hover {
+
             background: #1d4ed8;
         }
 
-        .refresh {
-            margin-left: 10px;
+
+        button.secondary {
+
             background: #e5e7eb;
+
             color: #374151;
         }
 
-        .refresh:hover {
+
+        button.secondary:hover {
+
             background: #d1d5db;
         }
 
+
         .deploy-success {
+
             color: #047857;
         }
 
+
         .deploy-error {
+
             color: #b91c1c;
         }
 
+
         pre {
+
             background: #111827;
+
             color: #e5e7eb;
+
             padding: 18px;
+
             border-radius: 8px;
+
             overflow-x: auto;
+
             white-space: pre-wrap;
+
             word-break: break-word;
+
             line-height: 1.5;
+
             font-size: 14px;
         }
+
 
         @media (max-width: 650px) {
 
             body {
+
                 padding: 20px 12px;
             }
 
+
             .versions {
+
                 grid-template-columns: 1fr;
             }
 
-            .refresh {
-                margin-left: 0;
-                margin-top: 10px;
-            }
         }
 
     </style>
 
 </head>
 
+
 <body>
+
 
 <div class="container">
 
-    <h1>🚀 Deploy — Opoźnienia</h1>
+
+    <!-- ======================================================
+         HEADER
+    ======================================================= -->
+
+    <h1>
+        🚀 Deploy — Opoźnienia
+    </h1>
+
 
     <div class="repo">
 
         GitHub:
+
         <strong>
             <?= htmlspecialchars(
                 $repoOwner . '/' . $repoName
@@ -374,41 +529,65 @@ if ($status['success']) {
     </div>
 
 
+    <!-- ======================================================
+         STATUS
+    ======================================================= -->
+
     <?php if ($versionStatus === 'current'): ?>
 
         <div class="status current">
+
             ✓ Serwer jest aktualny
+
         </div>
+
 
     <?php elseif ($versionStatus === 'outdated'): ?>
 
         <div class="status outdated">
+
             ⚠ Dostępna jest nowa wersja
+
         </div>
+
 
     <?php else: ?>
 
         <div class="status unknown">
-            ❌ Nie udało się sprawdzić wersji.
+
+            ℹ Brak zapisanego statusu.
+            Kliknij „Odśwież status”.
+
         </div>
 
     <?php endif; ?>
 
 
+    <!-- ======================================================
+         MAIN CARD
+    ======================================================= -->
+
     <div class="card">
+
 
         <div class="versions">
 
+
             <div class="version-box">
 
                 <span class="version-label">
+
                     Wersja na serwerze
+
                 </span>
 
+
                 <span class="version">
+
                     <?= htmlspecialchars(
                         $localCommit ?? '—'
                     ) ?>
+
                 </span>
 
             </div>
@@ -417,68 +596,134 @@ if ($status['success']) {
             <div class="version-box">
 
                 <span class="version-label">
+
                     Wersja na GitHub
+
                 </span>
 
+
                 <span class="version">
+
                     <?= htmlspecialchars(
                         $githubCommit ?? '—'
                     ) ?>
+
                 </span>
 
             </div>
+
 
         </div>
 
 
-        <form
-            method="post"
-            onsubmit="return confirmDeploy();">
+        <?php if ($checkedAt !== null): ?>
 
-            <button
-                type="submit"
-                name="deploy"
-                value="1">
+            <div class="checked">
 
-                ⬇ Pobierz najnowszą wersję
+                Ostatnie sprawdzenie:
+                <strong>
+                    <?= htmlspecialchars($checkedAt) ?>
+                </strong>
 
-            </button>
+            </div>
 
-            <a
-                href="admin.php"
-                class="button refresh">
+        <?php endif; ?>
 
-                ↻ Odśwież status
 
-            </a>
+        <br>
 
-        </form>
+
+        <!-- ==================================================
+             BUTTONS
+        =================================================== -->
+
+        <div class="actions">
+
+
+            <!-- DEPLOY -->
+
+            <form
+                method="post"
+                onsubmit="return confirmDeploy();">
+
+                <button
+                    type="submit"
+                    name="deploy"
+                    value="1">
+
+                    ⬇ Pobierz najnowszą wersję
+
+                </button>
+
+            </form>
+
+
+            <!-- REFRESH STATUS -->
+
+            <form method="post">
+
+                <button
+                    type="submit"
+                    name="refresh_status"
+                    value="1"
+                    class="secondary">
+
+                    ↻ Odśwież status
+
+                </button>
+
+            </form>
+
+
+        </div>
+
 
     </div>
 
 
-    <?php if ($deployOutput !== null): ?>
+    <!-- ======================================================
+         ACTION RESULT
+    ======================================================= -->
+
+    <?php if ($actionOutput !== null): ?>
 
         <div class="card">
 
-            <?php if ($deploySuccess): ?>
+
+            <?php if ($actionSuccess): ?>
 
                 <h2 class="deploy-success">
-                    ✓ Deploy zakończony pomyślnie
+
+                    ✓
+                    <?php if ($actionType === 'deploy'): ?>
+                        Deploy zakończony pomyślnie
+                    <?php else: ?>
+                        Status został odświeżony
+                    <?php endif; ?>
+
                 </h2>
+
 
             <?php else: ?>
 
                 <h2 class="deploy-error">
-                    ❌ Deploy zakończony błędem
+
+                    ❌
+                    <?php if ($actionType === 'deploy'): ?>
+                        Deploy zakończony błędem
+                    <?php else: ?>
+                        Nie udało się odświeżyć statusu
+                    <?php endif; ?>
+
                 </h2>
 
             <?php endif; ?>
 
 
             <pre><?= htmlspecialchars(
-                $deployOutput
+                $actionOutput
             ) ?></pre>
+
 
         </div>
 
@@ -499,6 +744,7 @@ function confirmDeploy() {
 }
 
 </script>
+
 
 </body>
 
