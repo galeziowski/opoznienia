@@ -1,19 +1,21 @@
 <?php
 
 // ============================================================
-// CONFIGURATION
+// KONFIGURACJA
 // ============================================================
 
 $repoOwner = 'galeziowski';
-$repoName  = 'opoznienia';
-$branch    = 'main';
+$repoName = 'opoznienia';
+$branch = 'main';
 
 $projectDir = '/volume1/web/opoznienia';
 $deployScript = '/usr/local/bin/opoznienia-deploy.sh';
 
+$githubUrl = "https://github.com/{$repoOwner}/{$repoName}.git";
+
 
 // ============================================================
-// HELPERS
+// FUNKCJE
 // ============================================================
 
 function runCommand(string $command): array
@@ -25,94 +27,118 @@ function runCommand(string $command): array
 
     return [
         'output' => $output,
-        'code' => $returnCode
+        'returnCode' => $returnCode
     ];
 }
 
+
+/**
+ * Pobiera aktualny commit znajdujący się na serwerze.
+ */
 function getLocalCommit(string $projectDir): ?string
 {
-    $result = runCommand(
-        '/usr/local/bin/docker run --rm ' .
-        '-v ' . escapeshellarg($projectDir . ':/repo') . ' ' .
-        'alpine/git ' .
-        '-C /repo rev-parse --short HEAD'
-    );
+    $command =
+        '/usr/bin/git -C ' .
+        escapeshellarg($projectDir) .
+        ' rev-parse --short HEAD';
 
-    if ($result['code'] !== 0 || empty($result['output'])) {
+    $result = runCommand($command);
+
+    if ($result['returnCode'] !== 0 || empty($result['output'])) {
         return null;
     }
 
-    return trim($result['output'][0]);
+    $commit = trim($result['output'][0]);
+
+    if (!preg_match('/^[a-f0-9]{7,40}$/i', $commit)) {
+        return null;
+    }
+
+    return $commit;
 }
 
-function getGithubCommit(string $owner, string $repo, string $branch): ?string
+
+/**
+ * Pobiera aktualny commit z GitHuba.
+ *
+ * Korzystamy z tego samego kontenera alpine/git,
+ * który jest używany podczas deployu.
+ */
+function getGithubCommit(string $githubUrl, string $branch): ?string
 {
-    $url = "https://api.github.com/repos/"
-         . rawurlencode($owner)
-         . "/"
-         . rawurlencode($repo)
-         . "/commits/"
-         . rawurlencode($branch);
+    $command =
+        '/usr/local/bin/docker run --rm ' .
+        'alpine/git ' .
+        'ls-remote ' .
+        escapeshellarg($githubUrl) .
+        ' ' .
+        escapeshellarg('refs/heads/' . $branch);
 
-    $ch = curl_init($url);
+    $result = runCommand($command);
 
-    curl_setopt_array($ch, [
-        CURLOPT_RETURNTRANSFER => true,
-        CURLOPT_TIMEOUT => 10,
-        CURLOPT_USERAGENT => 'Opoznienia-Admin-Panel',
-        CURLOPT_HTTPHEADER => [
-            'Accept: application/vnd.github+json'
-        ]
-    ]);
-
-    $response = curl_exec($ch);
-    $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
-
-    curl_close($ch);
-
-    if ($response === false || $httpCode !== 200) {
+    if ($result['returnCode'] !== 0 || empty($result['output'])) {
         return null;
     }
 
-    $data = json_decode($response, true);
+    foreach ($result['output'] as $line) {
+        $line = trim($line);
 
-    if (!isset($data['sha'])) {
-        return null;
+        if (preg_match('/^([a-f0-9]{40})\s+refs\/heads\/' . preg_quote($branch, '/') . '$/i', $line, $matches)) {
+            return substr($matches[1], 0, 7);
+        }
     }
 
-    return substr($data['sha'], 0, 7);
+    return null;
+}
+
+
+/**
+ * Uruchamia deploy.
+ */
+function deploy(string $deployScript): array
+{
+    $command =
+        '/bin/sudo ' .
+        escapeshellarg($deployScript);
+
+    return runCommand($command);
 }
 
 
 // ============================================================
-// DEPLOY
+// OBSŁUGA DEPLOY
 // ============================================================
 
-$deployResult = null;
+$deployOutput = null;
+$deploySuccess = null;
 
-if ($_SERVER['REQUEST_METHOD'] === 'POST') {
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['deploy'])) {
 
-    if (isset($_POST['deploy'])) {
+    $result = deploy($deployScript);
 
-        $deployResult = runCommand(
-            '/bin/sudo ' . escapeshellarg($deployScript)
-        );
-    }
+    $deployOutput = implode("\n", $result['output']);
+    $deploySuccess = ($result['returnCode'] === 0);
+
 }
 
 
 // ============================================================
-// GET STATUS
+// SPRAWDZENIE WERSJI
 // ============================================================
 
 $localCommit = getLocalCommit($projectDir);
-$githubCommit = getGithubCommit($repoOwner, $repoName, $branch);
+$githubCommit = getGithubCommit($githubUrl, $branch);
 
-$isUpToDate = (
-    $localCommit !== null &&
-    $githubCommit !== null &&
-    $localCommit === $githubCommit
-);
+$versionStatus = 'unknown';
+
+if ($localCommit !== null && $githubCommit !== null) {
+
+    if (strcasecmp($localCommit, $githubCommit) === 0) {
+        $versionStatus = 'current';
+    } else {
+        $versionStatus = 'outdated';
+    }
+}
 
 
 // ============================================================
@@ -122,15 +148,15 @@ $isUpToDate = (
 ?>
 <!DOCTYPE html>
 <html lang="pl">
+
 <head>
+
     <meta charset="UTF-8">
 
-    <meta
-        name="viewport"
-        content="width=device-width, initial-scale=1.0"
-    >
+    <meta name="viewport"
+          content="width=device-width, initial-scale=1.0">
 
-    <title>Deploy - Opoźnienia</title>
+    <title>Deploy — Opoźnienia</title>
 
     <style>
 
@@ -140,7 +166,9 @@ $isUpToDate = (
 
         body {
             margin: 0;
-            padding: 30px 15px;
+            padding: 40px 20px;
+            background: #f5f7fa;
+            color: #1f2937;
             font-family:
                 -apple-system,
                 BlinkMacSystemFont,
@@ -148,299 +176,294 @@ $isUpToDate = (
                 Roboto,
                 Arial,
                 sans-serif;
-            background: #f4f6f8;
-            color: #202124;
         }
 
         .container {
-            max-width: 760px;
+            max-width: 900px;
             margin: 0 auto;
-        }
-
-        .card {
-            background: white;
-            border-radius: 12px;
-            padding: 30px;
-            box-shadow:
-                0 2px 8px rgba(0, 0, 0, 0.08);
         }
 
         h1 {
             margin-top: 0;
             margin-bottom: 8px;
-            font-size: 28px;
+            font-size: 30px;
         }
 
-        .repository {
+        .repo {
             color: #6b7280;
             margin-bottom: 30px;
         }
 
+        .card {
+            background: white;
+            border-radius: 12px;
+            padding: 24px;
+            margin-bottom: 20px;
+            box-shadow:
+                0 2px 8px rgba(0, 0, 0, 0.06);
+        }
+
         .status {
-            padding: 18px;
-            border-radius: 8px;
-            margin-bottom: 25px;
+            padding: 16px 20px;
+            border-radius: 10px;
+            margin-bottom: 20px;
             font-size: 18px;
             font-weight: 600;
         }
 
-        .status-ok {
-            background: #e8f5e9;
-            color: #1b5e20;
+        .status.current {
+            background: #ecfdf5;
+            color: #047857;
         }
 
-        .status-update {
-            background: #fff3cd;
-            color: #856404;
+        .status.outdated {
+            background: #fffbeb;
+            color: #b45309;
         }
 
-        .status-error {
-            background: #f8d7da;
-            color: #842029;
+        .status.unknown {
+            background: #fef2f2;
+            color: #b91c1c;
         }
 
         .versions {
             display: grid;
             grid-template-columns: 1fr 1fr;
-            gap: 15px;
-            margin-bottom: 25px;
+            gap: 16px;
+            margin-bottom: 24px;
         }
 
-        .version {
-            background: #f8f9fa;
-            border-radius: 8px;
+        .version-box {
+            background: #f8fafc;
+            border-radius: 10px;
             padding: 18px;
         }
 
         .version-label {
-            font-size: 13px;
+            display: block;
             color: #6b7280;
+            font-size: 14px;
             margin-bottom: 8px;
         }
 
-        .commit {
+        .version {
             font-family: monospace;
-            font-size: 20px;
-            font-weight: bold;
-        }
-
-        .actions {
-            display: flex;
-            gap: 10px;
-            flex-wrap: wrap;
+            font-size: 22px;
+            font-weight: 700;
         }
 
         button,
         .button {
+            display: inline-block;
             border: 0;
-            border-radius: 7px;
-            padding: 13px 20px;
-            font-size: 15px;
+            border-radius: 8px;
+            padding: 12px 18px;
+            font-size: 16px;
             font-weight: 600;
             cursor: pointer;
             text-decoration: none;
-            display: inline-block;
-        }
-
-        .deploy {
-            background: #1976d2;
+            background: #2563eb;
             color: white;
         }
 
-        .deploy:hover {
-            background: #1565c0;
+        button:hover,
+        .button:hover {
+            background: #1d4ed8;
         }
 
         .refresh {
-            background: #e9ecef;
-            color: #343a40;
+            margin-left: 10px;
+            background: #e5e7eb;
+            color: #374151;
         }
 
         .refresh:hover {
-            background: #dee2e6;
+            background: #d1d5db;
         }
 
-        .result {
-            margin-top: 25px;
+        .deploy-success {
+            color: #047857;
         }
 
-        .result h2 {
-            font-size: 18px;
-            margin-bottom: 10px;
+        .deploy-error {
+            color: #b91c1c;
         }
 
         pre {
-            background: #1e1e1e;
-            color: #f1f1f1;
+            background: #111827;
+            color: #e5e7eb;
             padding: 18px;
             border-radius: 8px;
             overflow-x: auto;
-            font-size: 13px;
-            line-height: 1.5;
             white-space: pre-wrap;
             word-break: break-word;
+            line-height: 1.5;
         }
 
-        .footer {
-            text-align: center;
-            margin-top: 20px;
-            color: #888;
-            font-size: 12px;
-        }
+        @media (max-width: 650px) {
 
-        @media (max-width: 600px) {
-
-            .card {
-                padding: 20px;
+            body {
+                padding: 20px 12px;
             }
 
             .versions {
                 grid-template-columns: 1fr;
             }
 
-            .actions {
-                flex-direction: column;
+            .refresh {
+                margin-left: 0;
+                margin-top: 10px;
             }
 
-            button,
-            .button {
-                width: 100%;
-                text-align: center;
-            }
         }
 
     </style>
+
 </head>
 
 <body>
 
 <div class="container">
 
-    <div class="card">
+    <h1>🚀 Deploy — Opoźnienia</h1>
 
-        <h1>🚀 Deploy — Opoźnienia</h1>
+    <div class="repo">
+        GitHub:
+        <strong><?= htmlspecialchars($repoOwner . '/' . $repoName) ?></strong>
+        · branch:
+        <strong><?= htmlspecialchars($branch) ?></strong>
+    </div>
 
-        <div class="repository">
-            GitHub:
-            <strong>
-                <?= htmlspecialchars($repoOwner . '/' . $repoName) ?>
-            </strong>
-            · branch:
-            <strong>
-                <?= htmlspecialchars($branch) ?>
-            </strong>
+
+    <!-- ======================================================
+         STATUS
+    ======================================================= -->
+
+    <?php if ($versionStatus === 'current'): ?>
+
+        <div class="status current">
+            ✓ Serwer jest aktualny
         </div>
 
+    <?php elseif ($versionStatus === 'outdated'): ?>
 
-        <?php if ($localCommit === null || $githubCommit === null): ?>
+        <div class="status outdated">
+            ⚠ Dostępna jest nowa wersja
+        </div>
 
-            <div class="status status-error">
-                ❌ Nie udało się sprawdzić wersji.
-            </div>
+    <?php else: ?>
 
-        <?php elseif ($isUpToDate): ?>
+        <div class="status unknown">
+            ❌ Nie udało się sprawdzić wersji.
+        </div>
 
-            <div class="status status-ok">
-                ✓ Serwer jest aktualny
-            </div>
+    <?php endif; ?>
 
-        <?php else: ?>
 
-            <div class="status status-update">
-                ⚠ Dostępna jest nowa wersja
-            </div>
+    <!-- ======================================================
+         WERSJE
+    ======================================================= -->
 
-        <?php endif; ?>
-
+    <div class="card">
 
         <div class="versions">
 
-            <div class="version">
+            <div class="version-box">
 
-                <div class="version-label">
+                <span class="version-label">
                     Wersja na serwerze
-                </div>
+                </span>
 
-                <div class="commit">
+                <span class="version">
                     <?= htmlspecialchars($localCommit ?? '—') ?>
-                </div>
+                </span>
 
             </div>
 
 
-            <div class="version">
+            <div class="version-box">
 
-                <div class="version-label">
+                <span class="version-label">
                     Wersja na GitHub
-                </div>
+                </span>
 
-                <div class="commit">
+                <span class="version">
                     <?= htmlspecialchars($githubCommit ?? '—') ?>
-                </div>
+                </span>
 
             </div>
 
         </div>
 
 
-        <div class="actions">
+        <!-- ==================================================
+             DEPLOY
+        =================================================== -->
 
-            <form method="post">
+        <form method="post"
+              onsubmit="return confirmDeploy();">
 
-                <button
-                    type="submit"
+            <button type="submit"
                     name="deploy"
-                    value="1"
-                    class="deploy"
-                    onclick="
-                        return confirm(
-                            'Czy na pewno pobrać najnowszą wersję z GitHub?'
-                        );
-                    "
-                >
-                    ⬇ Pobierz najnowszą wersję
-                </button>
+                    value="1">
+                ⬇ Pobierz najnowszą wersję
+            </button>
 
-            </form>
-
-
-            <a
-                href="<?= htmlspecialchars($_SERVER['PHP_SELF']) ?>"
-                class="button refresh"
-            >
+            <a href="admin.php"
+               class="button refresh">
                 ↻ Odśwież status
             </a>
 
-        </div>
+        </form>
+
+    </div>
 
 
-        <?php if ($deployResult !== null): ?>
+    <!-- ======================================================
+         WYNIK DEPLOYU
+    ======================================================= -->
 
-            <div class="result">
+    <?php if ($deployOutput !== null): ?>
 
-                <h2>
-                    <?= $deployResult['code'] === 0
-                        ? '✓ Wynik deployu'
-                        : '❌ Deploy zakończony błędem'
-                    ?>
+        <div class="card">
+
+            <?php if ($deploySuccess): ?>
+
+                <h2 class="deploy-success">
+                    ✓ Deploy zakończony pomyślnie
                 </h2>
 
-                <pre><?= htmlspecialchars(
-                    implode("\n", $deployResult['output'])
-                ) ?></pre>
+            <?php else: ?>
 
-            </div>
+                <h2 class="deploy-error">
+                    ❌ Deploy zakończony błędem
+                </h2>
 
-        <?php endif; ?>
-
-    </div>
+            <?php endif; ?>
 
 
-    <div class="footer">
-        Opoźnienia · Deployment Panel
-    </div>
+            <pre><?= htmlspecialchars($deployOutput) ?></pre>
+
+        </div>
+
+    <?php endif; ?>
+
 
 </div>
 
+
+<script>
+
+function confirmDeploy() {
+
+    return confirm(
+        "Czy na pewno chcesz pobrać najnowszą wersję z GitHuba?"
+    );
+
+}
+
+</script>
+
 </body>
+
 </html>
